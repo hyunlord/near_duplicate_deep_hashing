@@ -65,6 +65,8 @@ class PKSampler(BatchSampler):
                     anchor_idx = random.choice(self.labels_to_anchors[label])
                     positive_indices = random.sample(self.labels_to_positives[label], self.k - 1)
                     batch_indices.extend([anchor_idx] + positive_indices)
+                if len(batch_indices) == 0:
+                    continue
                 random.shuffle(batch_indices)
                 yield batch_indices
             except Exception as e:

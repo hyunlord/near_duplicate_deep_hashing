@@ -42,12 +42,6 @@ def main():
         monitor='val/hash_match_acc',
         mode='max'
     )
-    early_stopping_callback = EarlyStopping(
-        monitor='val/hash_match_acc',
-        patience=50,
-        verbose=True,
-        mode='max'
-    )
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     csv_logger = CSVLogger("logs/", name="deep_hashing")
 
@@ -56,7 +50,7 @@ def main():
         accelerator='auto',
         precision=32,
         log_every_n_steps=10,
-        callbacks=[checkpoint_callback, early_stopping_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor],
         logger=csv_logger,
         num_sanity_val_steps=0,
         strategy=DDPStrategy(find_unused_parameters=True)

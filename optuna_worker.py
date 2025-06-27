@@ -52,6 +52,6 @@ def objective(trial):
 if __name__ == "__main__":
     study = optuna.load_study(
         study_name="deep_hash_opt",
-        storage="sqlite:///optuna.db"
+        storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     study.optimize(objective, n_trials=1)

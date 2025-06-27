@@ -203,11 +203,6 @@ class DeepHashingModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, labels = batch
-        unique_labels = labels.unique()
-        if unique_labels.numel() < 2:
-            dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
-            self.log("train/skipped_batch", 1.0, on_step=True, logger=True, sync_dist=True)
-            return dummy_loss
         # 중복 계산을 방지하기 위해 전체 배치 이미지를 한 번에 임베딩 게산
         images_embeds_list = self(images)
         total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='train')
@@ -231,38 +226,18 @@ class DeepHashingModel(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
+        images, labels = batch
         with torch.no_grad():
-            images, labels = batch
-            unique_labels = labels.unique()
-            if unique_labels.numel() < 2:
-                dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
-                self.log("train/skipped_batch", 1.0, on_step=True, logger=True, sync_dist=True)
-                return dummy_loss
             images_embeds_list = self(images)
-            total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='val')
-
-            bit_list_length = len(self.hparams.bit_list)
-            alphas = self.calculate_alpha(total_losses, bit_list_length)
-
-            # --- 장단기 계단식 자기 증류 손실 계산 ---
-            hash_codes = [torch.sign(out) for out in images_embeds_list]
-            lcs_losses = self.calculate_lcs_loss(hash_codes)
-
-            # --- 최종 목표 함수 계산 ---
-            total_loss = 0
-            for k in range(bit_list_length - 1):
-                total_loss += alphas[k] * (total_losses[k] + self.hparams.lambda_lcs * lcs_losses[k])
-            total_loss += alphas[bit_list_length - 1] * total_losses[bit_list_length - 1]
-            self.log("val/lcs_loss", sum(lcs_losses),
-                     on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
-            self.log("val/final_loss", total_loss,
-                     on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
-
-            for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
-                self.validation_step_outputs_mAP[bit].append((images_embeds.detach(), labels.detach()))
-                anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
-                if anchors is not None:
-                    self.validation_step_outputs_acc[bit].append((anchors.detach(), positives.detach(), negatives.detach()))
+        total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='val')
+        final_val_loss = sum(total_losses)
+        self.log("val/final_loss", final_val_loss,
+                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
+        for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
+            self.validation_step_outputs_mAP[bit].append((images_embeds.detach(), labels.detach()))
+            anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
+            if anchors is not None:
+                self.validation_step_outputs_acc[bit].append((anchors.detach(), positives.detach(), negatives.detach()))
 
     def calculate_and_log_map(self):
         for bit in self.hparams.bit_list:

@@ -54,9 +54,10 @@ def objective(trial):
         "images_per_group": 10,
         "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
         "epochs": 5,  # 빠른 실험
-        "num_workers": 4,
+        "num_workers": 28,
         "seed": 42,
         "bit_list": [8, 16, 32, 48, 64, 128],
+        "recall_k_values": [1, 10, 50, 100]
     }
     pl.seed_everything(config["seed"], workers=True)
     model = DeepHashingModel(config)

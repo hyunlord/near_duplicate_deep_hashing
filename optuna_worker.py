@@ -5,6 +5,11 @@ warnings.filterwarnings(
     message=".* exceeds limit of .* pixels.*",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=".*It is recommended to use.*",
+    module="pytorch_lightning.trainer.connectors.logger_connector.result"
+)
 
 from tqdm import tqdm
 
@@ -77,16 +82,13 @@ def objective(trial):
     metrics = trainer.callback_metrics
     for name, tensor in metrics.items():
         trial.set_user_attr(name, float(tensor))
-
-    mAP = float(metrics["val/64_mAP"])
-    recall = float(metrics["val/64_Recall@1"])
-    pos_hash_acc = float(metrics["val/64_pos_hash_acc"])
-    return mAP, recall, pos_hash_acc
+    final_loss = float(metrics["val/final_loss"])
+    return final_loss
 
 
 if __name__ == "__main__":
     study = optuna.load_study(
-        study_name="multi_obj_deep_hash_opt",
+        study_name="val_loss_deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     total_trials = 50

@@ -79,8 +79,6 @@ def objective(trial):
     trainer.fit(model, datamodule=datamodule)
     return trainer.callback_metrics["val/32_pos_hash_acc"].item()
 
-tqdm_callback = TQDMCallback()
-
 
 if __name__ == "__main__":
     study = optuna.load_study(

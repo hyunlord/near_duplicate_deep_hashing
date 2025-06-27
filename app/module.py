@@ -1,3 +1,7 @@
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.metrics import average_precision_score
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,6 +45,9 @@ class DeepHashingModel(pl.LightningModule):
         backbone.gradient_checkpointing_enable()
         self.vision_model = backbone.vision_model
         self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim, self.hparams.bit_list)
+
+        self.validation_step_outputs_mAP = {bit: [] for bit in self.hparams.bit_list}
+        self.validation_step_outputs_acc = {bit: [] for bit in self.hparams.bit_list}
 
     def forward(self, images):
         features = self.vision_model(images).last_hidden_state.mean(dim=1)
@@ -231,17 +238,12 @@ class DeepHashingModel(pl.LightningModule):
 
         hash_anchor = torch.sign(anchors)
         hash_pos = torch.sign(pos)
-        pos_neg_gap = pos_sim - neg_sim
         pos_hash_acc = (hash_anchor == hash_pos).all(dim=1).float().mean().item()
         self.log(f"val/{bit}_pos_sim", pos_sim,
                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log(f"val/{bit}_neg_sim", neg_sim,
                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        self.log(f"val/{bit}_pos_neg_gap", pos_neg_gap,
-                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc,
-                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        self.log(f"val/{bit}_acc_gap", pos_neg_gap + pos_hash_acc,
                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
@@ -249,11 +251,117 @@ class DeepHashingModel(pl.LightningModule):
             images, labels = batch
             images_embeds_list = self(images)
             for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
+                self.validation_step_outputs_mAP[bit].append((images_embeds.detach(), labels.detach()))
                 anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
-                if anchors is None:
-                    dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
-                    return dummy_loss
-                self.calculate_sim_acc(anchors, positives, negatives, bit)
+                if anchors is not None:
+                    self.validation_step_outputs_acc[bit].append((anchors.detach(), positives.detach(), negatives.detach()))
+
+    def calculate_and_log_map(self):
+        for bit in self.hparams.bit_list:
+            outputs = self.validation_step_outputs_mAP[bit]
+            if not outputs:
+                continue
+            embeds_list = [out[0] for out in outputs]
+            labels_list = [out[1] for out in outputs]
+            embeds = torch.cat(embeds_list, dim=0).cpu()
+            labels = torch.cat(labels_list, dim=0).cpu().numpy()
+
+            codes = (torch.sign(embeds) > 0).byte().numpy()
+            query_labels = (labels[:, None] == labels[None, :]).astype(np.uint8)
+            hamm_dist = cdist(codes, codes, metric='hamming') * bit
+
+            aps = []
+            for i in range(codes.shape[0]):
+                y_true = query_labels[i]
+                # Hamming 거리가 가까울수록 점수가 높아야 하므로 음수를 취합니다.
+                y_scores = -hamm_dist[i]
+                aps.append(average_precision_score(y_true, y_scores))
+            if not aps:
+                mean_ap = 0.0
+                print(f"Could not compute mAP for {bit}-bit (all classes have <= 1 sample).")
+            else:
+                mean_ap = float(np.mean(aps))
+            self.log(f"val/{bit}_mAP", mean_ap, prog_bar=True, sync_dist=False)
+
+    def calculate_and_log_acc_sim(self):
+        cos = nn.CosineSimilarity(dim=1)
+        for bit in self.hparams.bit_list:
+            outputs = self.validation_step_outputs_acc[bit]
+            if not outputs:
+                print(f"Skipping Acc/Sim calculation for {bit}-bit: no validation outputs.")
+                continue
+            # 모든 스텝의 (anchor, pos, neg) 튜플을 각각의 리스트로 분리
+            # outputs는 [(A1, P1, N1), (A2, P2, N2), ...] 형태
+            anchors_list, pos_list, neg_list = zip(*outputs)
+            # 전체 앵커, 포지티브, 네거티브를 하나의 큰 텐서로 합침
+            all_anchors = torch.cat(anchors_list, dim=0)
+            all_positives = torch.cat(pos_list, dim=0)
+            all_negatives = torch.cat(neg_list, dim=0)
+            # 1. 유사도 계산
+            pos_sim = cos(all_anchors, all_positives).mean().item()
+            neg_sim = cos(all_anchors, all_negatives).mean().item()
+            # 2. 해시 정확도 계산
+            hash_anchor = torch.sign(all_anchors)
+            hash_pos = torch.sign(all_positives)
+            # (전체 정답 쌍 개수) / (전체 쌍 개수)
+            pos_hash_acc = (hash_anchor == hash_pos).all(dim=1).float().mean().item()
+            self.log(f"val/{bit}_pos_sim", pos_sim, prog_bar=True, sync_dist=False)
+            self.log(f"val/{bit}_neg_sim", neg_sim, prog_bar=True, sync_dist=False)
+            self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc, prog_bar=True, sync_dist=False)
+
+    def calculate_and_log_recall_at_k(self):
+        for bit in self.hparams.bit_list:
+            outputs = self.validation_step_outputs_mAP[bit]
+            if not outputs:
+                continue
+            # 1. 데이터 취합 및 해시 코드 생성
+            embeds = torch.cat([out[0] for out in outputs], dim=0).cpu()
+            labels = torch.cat([out[1] for out in outputs], dim=0).cpu().numpy()
+            codes = (torch.sign(embeds) > 0).numpy().astype(np.uint8)
+            num_data = codes.shape[0]
+            # 2. 모든 쌍 간의 Hamming 거리 계산
+            hamm_dist_matrix = cdist(codes, codes, metric='hamming') * bit
+            # 3. 각 쿼리에 대한 전체 정답 개수 미리 계산
+            # is_relevant[i, j] = True if label[i] == label[j]
+            is_relevant = labels[:, None] == labels[None, :]
+            np.fill_diagonal(is_relevant, False)
+            total_relevant_per_query = is_relevant.sum(axis=1)
+            # 4. 각 K 값에 대해 Recall 계산
+            for k in self.hparams.recall_k_values:
+                recalls_for_this_k = []
+                for i in range(num_data):
+                    # i번째 쿼리의 전체 정답 개수
+                    total_relevant = total_relevant_per_query[i]
+                    # i번째 쿼리와 다른 모든 데이터 간의 거리
+                    dists = hamm_dist_matrix[i]
+                    # 거리를 기준으로 인덱스 정렬 (가장 가까운 순)
+                    sorted_indices = np.argsort(dists)
+                    # 상위 K개의 이웃 선택 (자기 자신인 첫 번째 인덱스 제외)
+                    retrieved_indices = sorted_indices[1:k + 1]
+                    # 상위 K개 이웃이 정답인지 확인
+                    # is_relevant[i, retrieved_indices] -> 쿼리 i에 대해, 뽑힌 애들이 정답인지 아닌지 bool 배열
+                    num_retrieved_relevant = is_relevant[i, retrieved_indices].sum()
+                    # Recall 계산
+                    recall_for_query = num_retrieved_relevant / total_relevant
+                    recalls_for_this_k.append(recall_for_query)
+                # 모든 쿼리에 대한 Recall@K의 평균 계산
+                if recalls_for_this_k:
+                    mean_recall_at_k = np.mean(recalls_for_this_k)
+                    self.log(f"val/{bit}_Recall@{k}", mean_recall_at_k, prog_bar=True, sync_dist=False)
+
+    def on_validation_epoch_end(self):
+        if not self.trainer.is_global_zero:
+            return
+        # --- 1. mAP 계산 ---
+        self.calculate_and_log_map()
+        # --- 2. Accuracy 및 Similarity 계산 ---
+        self.calculate_and_log_acc_sim()
+        # --- 3. Recall@K 계산 ---
+        self.calculate_and_log_recall_at_k()
+        # --- 4. 다음 에폭을 위해 저장된 출력 리스트 비우기 ---
+        for bit in self.hparams.bit_list:
+            self.validation_step_outputs_mAP[bit].clear()
+            self.validation_step_outputs_acc[bit].clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)

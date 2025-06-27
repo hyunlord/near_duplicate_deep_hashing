@@ -68,8 +68,7 @@ def objective(trial):
         devices=1,
         precision=16,
         logger=False,
-        callbacks=[CustomPruningCallback(trial, monitor="val/64_acc_gap"),
-                   TQDMProgressBar(refresh_rate=1)],
+        callbacks=[TQDMProgressBar(refresh_rate=1)],
         log_every_n_steps=1
     )
     trainer.fit(model, datamodule=datamodule)
@@ -77,13 +76,17 @@ def objective(trial):
     metrics = trainer.callback_metrics
     for name, tensor in metrics.items():
         trial.set_user_attr(name, float(tensor))
-    return trainer.callback_metrics["val/64_acc_gap"].item()
+
+    mAP = float(metrics["val/64_mAP"])
+    recall = float(metrics["val/64_Recall@1"])
+    pos_hash_acc = float(metrics["val/64_pos_hash_acc"])
+    return mAP, recall, pos_hash_acc
 
 
 if __name__ == "__main__":
     study = optuna.load_study(
-        study_name="deep_hash_opt",
-        storage="sqlite:////hanmail/users/rexxa.som/shared3/optuna.db"
+        study_name="multi_obj_deep_hash_opt",
+        storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     total_trials = 50
     simple_pb = SimpleTqdmCallback(total_trials=total_trials)

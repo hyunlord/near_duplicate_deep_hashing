@@ -85,8 +85,8 @@ if __name__ == "__main__":
         study_name="deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
-    total_trials = 1
-    simple_pb = SimpleTqdmCallback(total_trials=1)
+    total_trials = 50
+    simple_pb = SimpleTqdmCallback(total_trials=total_trials)
     study.optimize(objective,
                    n_trials=total_trials,
                    callbacks=[simple_pb])

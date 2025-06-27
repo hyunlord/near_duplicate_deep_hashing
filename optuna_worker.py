@@ -69,8 +69,8 @@ def objective(trial):
         precision=16,
         logger=False,
         callbacks=[CustomPruningCallback(trial, monitor="val/64_acc_gap"),
-                   TQDMProgressBar(refresh_rate=10)],
-        log_every_n_steps=5
+                   TQDMProgressBar(refresh_rate=1)],
+        log_every_n_steps=1
     )
     trainer.fit(model, datamodule=datamodule)
 

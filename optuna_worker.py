@@ -66,6 +66,7 @@ def objective(trial):
         max_epochs=config["epochs"],
         accelerator="gpu",
         devices=1,
+        precision=16,
         logger=False,
         callbacks=[CustomPruningCallback(trial, monitor="val/32_pos_hash_acc"),
                    TQDMProgressBar(refresh_rate=10)],

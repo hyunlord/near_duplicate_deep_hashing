@@ -62,9 +62,9 @@ class ImageTripletDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         ds = load_dataset(self.config['dataset_name'], cache_dir=self.config['cache_dir'])
-        self.train_ds = ds['train'].cast_column('image', HFImage()).select(range(10000))
-        self.val_ds = ds['validation'].cast_column('image', HFImage()).select(range(1000))
-        self.test_ds = ds['test'].cast_column('image', HFImage()).select(range(1000))
+        self.train_ds = ds['train'].cast_column('image', HFImage()).select(range(4000))
+        self.val_ds = ds['validation'].cast_column('image', HFImage()).select(range(400))
+        self.test_ds = ds['test'].cast_column('image', HFImage()).select(range(400))
 
         # train 그룹 인덱스 생성
         self.train_group_indices = [

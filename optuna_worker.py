@@ -68,7 +68,7 @@ def objective(trial):
         devices=1,
         precision=16,
         logger=False,
-        callbacks=[CustomPruningCallback(trial, monitor="val/32_pos_hash_acc"),
+        callbacks=[CustomPruningCallback(trial, monitor="val/64_pos_hash_acc"),
                    TQDMProgressBar(refresh_rate=10)],
         log_every_n_steps=5
     )

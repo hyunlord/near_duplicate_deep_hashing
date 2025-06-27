@@ -44,24 +44,19 @@ def objective(trial):
         "dataset_name": "hyunlord/query_image_anchor_positive_large_384",
         "cache_dir": "./.cache",
         "model_name": "google/siglip2-base-patch16-384",
-        "save_dir": "./checkpoints_nhl",
 
-        "hash_hidden_dim": trial.suggest_categorical("hash_hidden_dim", [256, 512, 768]),
-        "hash_dim": 128,
-        "margin": trial.suggest_float("margin", 0.2, 1.2),
-        "lambda_ortho": trial.suggest_float("lambda_ortho", 0.0, 0.1),
+        "hash_hidden_dim": trial.suggest_categorical("hash_hidden_dim", [256, 512, 768, 1024]),
+        "margin": trial.suggest_float("margin", 0.1, 1.5),
+        "lambda_ortho": trial.suggest_float("lambda_ortho", 0.0, 0.2),
         "lambda_lcs": trial.suggest_float("lambda_lcs", 0.0, 2.0),
-        "lambda_codebook": 0.5,
 
-        "freeze_backbone_epochs": 0,
         "batch_groups": 4,
-        "images_per_group": 5,  # 빠른 실험을 위한 축소
-        "image_size": 224,
-        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True),
+        "images_per_group": 10,
+        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
         "epochs": 5,  # 빠른 실험
         "num_workers": 4,
         "seed": 42,
-        "bit_list": [8, 16, 32],
+        "bit_list": [8, 16, 32, 48, 64, 128],
     }
     pl.seed_everything(config["seed"], workers=True)
     model = DeepHashingModel(config)
@@ -77,13 +72,13 @@ def objective(trial):
         log_every_n_steps=5
     )
     trainer.fit(model, datamodule=datamodule)
-    return trainer.callback_metrics["val/32_pos_hash_acc"].item()
+    return trainer.callback_metrics["val/64_pos_hash_acc"].item()
 
 
 if __name__ == "__main__":
     study = optuna.load_study(
         study_name="deep_hash_opt",
-        storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
+        storage="sqlite:////hanmail/users/rexxa.som/shared2/optuna.db"
     )
     total_trials = 50
     simple_pb = SimpleTqdmCallback(total_trials=total_trials)

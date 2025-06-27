@@ -1,10 +1,24 @@
 import optuna
-from optuna.integration import PyTorchLightningPruningCallback
 
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import Callback
 
 from app.module import DeepHashingModel
 from app.dataset import ImageTripletDataModule
+
+
+class CustomPruningCallback(Callback):
+    def __init__(self, trial, monitor):
+        self.trial = trial
+        self.monitor = monitor
+
+    def on_validation_end(self, trainer, pl_module):
+        current_score = trainer.callback_metrics.get(self.monitor)
+        if current_score is None:
+            return
+        self.trial.report(current_score.item(), step=trainer.current_epoch)
+        if self.trial.should_prune():
+            raise optuna.TrialPruned()
 
 
 def objective(trial):
@@ -25,7 +39,7 @@ def objective(trial):
         "batch_groups": 4,
         "images_per_group": 5,  # 빠른 실험을 위한 축소
         "image_size": 224,
-        "learning_rate": trial.suggest_loguniform("learning_rate", 1e-5, 5e-4),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True),
         "epochs": 5,  # 빠른 실험
         "num_workers": 4,
         "seed": 42,
@@ -41,9 +55,7 @@ def objective(trial):
         devices=1,
         logger=False,
         enable_progress_bar=False,
-        callbacks=[
-            PyTorchLightningPruningCallback(trial, monitor="val/32_pos_hash_acc")
-        ],
+        callbacks=[CustomPruningCallback(trial, monitor="val/32_pos_hash_acc")],
     )
     trainer.fit(model, datamodule=datamodule)
     return trainer.callback_metrics["val/32_pos_hash_acc"].item()

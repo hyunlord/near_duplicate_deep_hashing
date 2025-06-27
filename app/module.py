@@ -1,5 +1,3 @@
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -140,7 +138,7 @@ class DeepHashingModel(pl.LightningModule):
         triplet_loss = sum(triplet_losses)
         ortho_loss = sum(ortho_losses)
         total_loss = sum(total_losses)
-        self.log(f"{loss_type}/triplet_losses", triplet_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
+        self.log(f"{loss_type}/triplet_loss", triplet_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True, batch_size=images_embeds_list[0].size(0))
         self.log(f"{loss_type}/ortho_loss", ortho_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True, batch_size=images_embeds_list[0].size(0))
@@ -157,12 +155,14 @@ class DeepHashingModel(pl.LightningModule):
         W_nested = [final_linear_weight[:b, :] for b in self.hparams.bit_list]
         for k in range(bit_list_length):
             # Dominant Gradient(g_k^k)를 계산
-            g_k_k_tuple = torch.autograd.grad(total_losses[k], W_nested[k], retain_graph=True)
-            g_k_k = g_k_k_tuple[0]
+            g_k_k = torch.autograd.grad(total_losses[k], W_nested[k], retain_graph=True, allow_unused=True)[0]
+            if g_k_k is None:
+                g_k_k = torch.zeros_like(W_nested[k])
             for i in range(k + 1, bit_list_length):
                 # 다른 목적 함수가 W_k에 가하는 gradient(g_i^k)를 계산
-                g_i_k_tuple = torch.autograd.grad(total_losses[i], W_nested[k], retain_graph=True)
-                g_i_k = g_i_k_tuple[0]
+                g_i_k = torch.autograd.grad(total_losses[i], W_nested[k], retain_graph=True, allow_unused=True)[0]
+                if g_i_k is None:
+                    g_i_k = torch.zeros_like(W_nested[k])
 
                 # 내적을 통해 Anti-Domination 상태인지확인
                 inner_product = torch.sum(g_i_k * g_k_k)
@@ -210,7 +210,7 @@ class DeepHashingModel(pl.LightningModule):
 
         # --- 장단기 계단식 자기 증류 손실 계산 ---
         hash_codes = [torch.sign(out) for out in images_embeds_list]
-        lcs_losses = self._calculate_lcs_loss(hash_codes)
+        lcs_losses = self.calculate_lcs_loss(hash_codes)
 
         # --- 최종 목표 함수 계산 ---
         total_loss = 0
@@ -238,7 +238,6 @@ class DeepHashingModel(pl.LightningModule):
         with torch.no_grad():
             images, labels = batch
             images_embeds_list = self(images)
-            _ = self.calculate_base_loss(images_embeds_list, labels, loss_type='val')
             for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
                 anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
                 if anchors is None:

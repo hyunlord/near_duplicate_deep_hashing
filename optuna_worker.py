@@ -68,12 +68,12 @@ def objective(trial):
         devices=1,
         precision=16,
         logger=False,
-        callbacks=[CustomPruningCallback(trial, monitor="val/64_pos_hash_acc"),
+        callbacks=[CustomPruningCallback(trial, monitor="val/64_acc_gap"),
                    TQDMProgressBar(refresh_rate=10)],
         log_every_n_steps=5
     )
     trainer.fit(model, datamodule=datamodule)
-    return trainer.callback_metrics["val/64_pos_hash_acc"].item()
+    return trainer.callback_metrics["val/64_acc_gap"].item()
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ def objective(trial):
         "images_per_group": 5,  # 빠른 실험을 위한 축소
         "image_size": 224,
         "learning_rate": trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True),
-        "epochs": 5,  # 빠른 실험
+        "epochs": 1,  # 빠른 실험
         "num_workers": 4,
         "seed": 42,
         "bit_list": [8, 16, 32],

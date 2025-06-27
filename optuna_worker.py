@@ -9,7 +9,6 @@ warnings.filterwarnings(
 from tqdm import tqdm
 
 import optuna
-from optuna.integration import TQDMCallback
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback, TQDMProgressBar

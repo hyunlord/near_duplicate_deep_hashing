@@ -15,18 +15,21 @@ def main():
         "model_name": "google/siglip2-base-patch16-384",
         "save_dir": "./checkpoints",
 
+        "hash_hidden_dim": 512,
         "hash_dim": 128,
+        "num_classes": 1000,
         "margin": 0.5,
         "lambda_ortho": 0.05,
         "lambda_distill": 1.0,
+        "lambda_codebook": 0.5,
         "freeze_backbone_epochs": 0,
 
-        "p": 4,
-        "k": 4,
+        "batch_groups": 10,
+        "images_per_group": 10,
         "image_size": 384,
         "learning_rate": 3e-5,
         "epochs": 50,
-        "num_workers": 28,
+        "num_workers": 0,
         "seed": 42,
     }
     pl.seed_everything(config['seed'], workers=True)

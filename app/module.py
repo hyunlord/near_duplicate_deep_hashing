@@ -217,13 +217,13 @@ class DeepHashingModel(pl.LightningModule):
         for k in range(bit_list_length - 1):
             total_loss += alphas[k] * (total_losses[k] + self.hparams.lambda_lcs * lcs_losses[k])
         total_loss += alphas[bit_list_length - 1] * total_losses[bit_list_length - 1]
-        self.log("train/lcs_loss", sum(lcs_losses), on_step=True, on_epoch=True, prog_bar=True, logger=True,
-                 sync_dist=True, batch_size=images.size(0))
-        self.log("train/final_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
-                 sync_dist=True, batch_size=images.size(0))
+        self.log("train/lcs_loss", sum(lcs_losses),
+                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
+        self.log("train/final_loss", total_loss,
+                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
         return total_loss
 
-    def calculate_sim_acc(self, anchors, pos, neg):
+    def calculate_sim_acc(self, anchors, pos, neg, bit):
         # 평균 positive/negative cosine 유사도
         cos = nn.CosineSimilarity(dim=1)
         pos_sim = cos(anchors, pos).mean()
@@ -231,8 +231,18 @@ class DeepHashingModel(pl.LightningModule):
 
         hash_anchor = torch.sign(anchors)
         hash_pos = torch.sign(pos)
+        pos_neg_gap = pos_sim - neg_sim
         pos_hash_acc = (hash_anchor == hash_pos).all(dim=1).float().mean().item()
-        return pos_sim, neg_sim, pos_hash_acc
+        self.log(f"val/{bit}_pos_sim", pos_sim,
+                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(f"val/{bit}_neg_sim", neg_sim,
+                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(f"val/{bit}_pos_neg_gap", pos_neg_gap,
+                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc,
+                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log(f"val/{bit}_acc_gap", pos_neg_gap + pos_hash_acc,
+                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
         with torch.no_grad():
@@ -243,13 +253,7 @@ class DeepHashingModel(pl.LightningModule):
                 if anchors is None:
                     dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
                     return dummy_loss
-                pos_sim, neg_sim, pos_hash_acc = self.calculate_sim_acc(anchors, positives, negatives)
-                self.log(f"val/{bit}_pos_sim", pos_sim, on_step=False, on_epoch=True, prog_bar=True, logger=True,
-                         sync_dist=True)
-                self.log(f"val/{bit}_neg_sim", neg_sim, on_step=False, on_epoch=True, prog_bar=True, logger=True,
-                         sync_dist=True)
-                self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc, on_step=False, on_epoch=True,
-                         prog_bar=True, logger=True, sync_dist=True)
+                self.calculate_sim_acc(anchors, positives, negatives, bit)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)

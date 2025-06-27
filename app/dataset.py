@@ -47,6 +47,7 @@ class GroupBlockSampler(BatchSampler):
     def __len__(self):
         return self.num_batches
 
+
 class ImageTripletDataModule(pl.LightningDataModule):
     def __init__(self, config):
         super().__init__()

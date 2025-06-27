@@ -6,6 +6,8 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+from tqdm import tqdm
+
 import optuna
 from optuna.integration import TQDMCallback
 
@@ -14,6 +16,14 @@ from pytorch_lightning.callbacks import Callback, TQDMProgressBar
 
 from app.module import DeepHashingModel
 from app.dataset import ImageTripletDataModule
+
+
+class SimpleTqdmCallback:
+    def __init__(self, total_trials: int):
+        self._pbar = tqdm(total=total_trials, desc="Optuna Trials")
+
+    def __call__(self, study: optuna.Study, trial: optuna.Trial):
+        self._pbar.update(1)
 
 
 class CustomPruningCallback(Callback):
@@ -78,6 +88,8 @@ if __name__ == "__main__":
         study_name="deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
+    total_trials = 1
+    simple_pb = SimpleTqdmCallback(total_trials=1)
     study.optimize(objective,
-                   n_trials=1,
+                   n_trials=total_trials,
                    callbacks=[tqdm_callback])

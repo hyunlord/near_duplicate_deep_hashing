@@ -91,4 +91,4 @@ if __name__ == "__main__":
     simple_pb = SimpleTqdmCallback(total_trials=1)
     study.optimize(objective,
                    n_trials=total_trials,
-                   callbacks=[tqdm_callback])
+                   callbacks=[simple_pb])

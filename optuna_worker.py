@@ -1,7 +1,16 @@
+import warnings
+warnings.filterwarnings("ignore", message="No device id is provided via")
+warnings.filterwarnings(
+    "ignore",
+    message=".* exceeds limit of .* pixels.*",
+    category=UserWarning,
+)
+
 import optuna
+from optuna.integration import TQDMCallback
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.callbacks import Callback, TQDMProgressBar
 
 from app.module import DeepHashingModel
 from app.dataset import ImageTripletDataModule
@@ -54,11 +63,14 @@ def objective(trial):
         accelerator="gpu",
         devices=1,
         logger=False,
-        enable_progress_bar=False,
-        callbacks=[CustomPruningCallback(trial, monitor="val/32_pos_hash_acc")],
+        callbacks=[CustomPruningCallback(trial, monitor="val/32_pos_hash_acc"),
+                   TQDMProgressBar(refresh_rate=10)],
+        log_every_n_steps=5
     )
     trainer.fit(model, datamodule=datamodule)
     return trainer.callback_metrics["val/32_pos_hash_acc"].item()
+
+tqdm_callback = TQDMCallback()
 
 
 if __name__ == "__main__":
@@ -66,4 +78,6 @@ if __name__ == "__main__":
         study_name="deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
-    study.optimize(objective, n_trials=1)
+    study.optimize(objective,
+                   n_trials=1,
+                   callbacks=[tqdm_callback])

@@ -73,6 +73,10 @@ def objective(trial):
         log_every_n_steps=5
     )
     trainer.fit(model, datamodule=datamodule)
+
+    metrics = trainer.callback_metrics
+    for name, tensor in metrics.items():
+        trial.set_user_attr(name, float(tensor))
     return trainer.callback_metrics["val/64_acc_gap"].item()
 
 

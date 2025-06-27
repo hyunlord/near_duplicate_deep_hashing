@@ -79,7 +79,7 @@ def objective(trial):
 if __name__ == "__main__":
     study = optuna.load_study(
         study_name="deep_hash_opt",
-        storage="sqlite:////hanmail/users/rexxa.som/shared2/optuna.db"
+        storage="sqlite:////hanmail/users/rexxa.som/shared3/optuna.db"
     )
     total_trials = 50
     simple_pb = SimpleTqdmCallback(total_trials=total_trials)

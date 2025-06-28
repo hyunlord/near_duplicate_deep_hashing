@@ -11,6 +11,45 @@ import pytorch_lightning as pl
 from transformers import AutoModel
 
 
+# 파일 상단에 다른 import 문들과 함께 추가
+class ProxyAnchorLoss(nn.Module):
+    def __init__(self, num_classes, embedding_dim, margin=0.5, alpha=32):
+        super(ProxyAnchorLoss, self).__init__()
+        self.num_classes = num_classes
+        self.embedding_dim = embedding_dim
+        self.margin = margin
+        self.alpha = alpha
+
+        # 각 클래스를 대표하는 프록시를 학습 가능한 파라미터로 선언
+        self.proxies = nn.Parameter(torch.randn(num_classes, embedding_dim))
+        nn.init.kaiming_normal_(self.proxies, mode='fan_out')
+
+    def forward(self, embeddings, labels):
+        # 임베딩과 프록시 L2 정규화
+        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+        proxies_norm = F.normalize(self.proxies, p=2, dim=1)
+
+        # 코사인 유사도 계산
+        # cos_sim: (batch_size, num_classes)
+        cos_sim = torch.matmul(embeddings_norm, proxies_norm.t())
+
+        # Positive / Negative 프록시 구분
+        # one_hot: (batch_size, num_classes)
+        one_hot = torch.zeros_like(cos_sim)
+        one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
+
+        positive_proxies = cos_sim[one_hot.bool()]
+        negative_proxies = cos_sim[~one_hot.bool()]
+
+        # Proxy-Anchor Loss 계산 (논문의 수식 기반)
+        # F.logsigmoid(x) = log(1 / (1 + exp(-x))) -> log(1 + exp(x))와 유사한 효과 + 수치적 안정성
+        pos_loss = torch.mean(F.logsigmoid(-(positive_proxies - self.margin) * self.alpha))
+        neg_loss = torch.mean(F.logsigmoid((negative_proxies + self.margin) * self.alpha))
+
+        loss = -pos_loss - neg_loss
+        return loss
+
+
 class NestedHashLayer(nn.Module):
     def __init__(self, feature_dim: int, hidden_size, bit_list: list[int]):
         super().__init__()

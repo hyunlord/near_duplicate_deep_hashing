@@ -82,7 +82,7 @@ def objective(trial):
     metrics = trainer.callback_metrics
     for name, tensor in metrics.items():
         trial.set_user_attr(name, float(tensor))
-    pos_hash_acc = float(metrics["val/pos_hash_acc"])
+    pos_hash_acc = float(metrics["val/64_pos_hash_acc"])
     pos_sim = float(metrics["val/64_pos_sim"])
     neg_sim = float(metrics["val/64_neg_sim"])
     return pos_hash_acc, pos_sim, neg_sim

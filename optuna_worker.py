@@ -54,15 +54,16 @@ def objective(trial):
         "margin": trial.suggest_float("margin", 0.1, 1.5),
         "lambda_ortho": trial.suggest_float("lambda_ortho", 0.0, 0.2),
         "lambda_lcs": trial.suggest_float("lambda_lcs", 0.0, 2.0),
+        "lambda_cons": trial.suggest_float("lambda_lcs", 0.0, 0.5),
+        "lambda_quant": trial.suggest_float("lambda_lcs", 0.0, 0.2),
 
         "batch_groups": 4,
         "images_per_group": 10,
         "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-        "epochs": 5,  # 빠른 실험
+        "epochs": 3,
         "num_workers": 28,
         "seed": 42,
-        "bit_list": [8, 16, 32, 48, 64, 128],
-        "recall_k_values": [1, 10, 50, 100]
+        "bit_list": [8, 16, 32, 48, 64, 128]
     }
     pl.seed_everything(config["seed"], workers=True)
     model = DeepHashingModel(config)
@@ -82,15 +83,13 @@ def objective(trial):
     metrics = trainer.callback_metrics
     for name, tensor in metrics.items():
         trial.set_user_attr(name, float(tensor))
-    pos_hash_acc = float(metrics["val/64_pos_hash_acc"])
-    pos_sim = float(metrics["val/64_pos_sim"])
-    neg_sim = float(metrics["val/64_neg_sim"])
-    return pos_hash_acc, pos_sim, neg_sim
+    final_score = float(metrics["val/64_final_score"])
+    return final_score
 
 
 if __name__ == "__main__":
     study = optuna.load_study(
-        study_name="acc_pos_neg_deep_hash_opt",
+        study_name="final_score_deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     total_trials = 50

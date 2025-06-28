@@ -1,6 +1,4 @@
-import numpy as np
-from scipy.spatial.distance import cdist
-from sklearn.metrics import average_precision_score
+import os
 
 import torch
 import torch.nn as nn
@@ -44,10 +42,10 @@ class DeepHashingModel(pl.LightningModule):
         backbone.config.gradient_checkpointing = True
         backbone.gradient_checkpointing_enable()
         self.vision_model = backbone.vision_model
-        self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim, self.hparams.bit_list)
-
-        self.validation_step_outputs_mAP = {bit: [] for bit in self.hparams.bit_list}
-        self.validation_step_outputs_acc = {bit: [] for bit in self.hparams.bit_list}
+        self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim,
+                                   self.hparams.bit_list)
+        self.register_buffer("bit_importance_ema", None)
+        self.ema_decay = 0.99
 
     def forward(self, images):
         features = self.vision_model(images).last_hidden_state.mean(dim=1)
@@ -117,10 +115,17 @@ class DeepHashingModel(pl.LightningModule):
         neg_labels = labels[hard_negative_indices]
         return anchors, positives, negatives, anchor_labels, pos_labels, neg_labels
 
+    def contrastive_loss(self, anchor, other, label, margin=1.0):
+        # label: 1 (positive), 0 (negative)
+        euclidean_dist = F.pairwise_distance(anchor, other, keepdim=True)
+        loss = label * (euclidean_dist ** 2) + (1 - label) * (F.relu(margin - euclidean_dist) ** 2)
+        return loss.mean()
+
     def calculate_base_loss(self, images_embeds_list, labels, loss_type):
         triplet_losses, ortho_losses, total_losses = [], [], []
         for images_embeds in images_embeds_list:
-            anchors, positives, negatives, anchor_labels, pos_labels, neg_labels = self.vectorized_sample_hard_triplets(images_embeds, labels)
+            anchors, positives, negatives, anchor_labels, pos_labels, neg_labels = \
+                self.vectorized_sample_hard_triplets(images_embeds, labels)
             if anchors is None:
                 self.log("train/skipped_batch", 1.0, on_step=True, logger=True, sync_dist=True)
                 zero_loss = sum(torch.sum(embed) for embed in images_embeds_list) * 0.0
@@ -129,14 +134,19 @@ class DeepHashingModel(pl.LightningModule):
                 ortho_losses.append(zero_loss)
                 total_losses.append(zero_loss)
                 continue
-
             # Triplet loss
-            triplet_loss = F.triplet_margin_loss(anchors, positives, negatives, margin=self.hparams.margin)
+            #triplet_loss = F.triplet_margin_loss(anchors, positives, negatives, margin=self.hparams.margin)
 
-            # Ortho loss
-            all_embeds = torch.cat([anchors, positives, negatives], dim=0)
-            all_labels = torch.cat([anchor_labels, pos_labels, neg_labels], dim=0)
-            ortho_loss = self.class_aware_ortho_hash_loss(all_embeds, all_labels)
+            # contrastive_pair_loss
+            positive_loss = self.contrastive_loss(anchors, positives, torch.ones_like(anchor_labels),
+                                                  margin=self.hparams.margin)
+            negative_loss = self.contrastive_loss(anchors, negatives, torch.zeros_like(anchor_labels),
+                                                  margin=self.hparams.margin)
+            triplet_loss = (positive_loss + negative_loss) / 2.0
+
+            # Ortho loss: anchor+positives
+            ortho_loss = self.class_aware_ortho_hash_loss(images_embeds, labels)
+
             total_loss = triplet_loss + self.hparams.lambda_ortho * ortho_loss
 
             triplet_losses.append(triplet_loss)
@@ -175,9 +185,8 @@ class DeepHashingModel(pl.LightningModule):
                 inner_product = torch.sum(g_i_k * g_k_k)
                 if inner_product < 0:
                     # 충돌 시 가중치 후보 alpha_i_k를 계산 후 alpha_i를 업데이트
-                    alpha_i_k = (alphas[k] / (k - bit_list_length)) * (torch.sum(g_k_k**2) / inner_product)
+                    alpha_i_k = (alphas[k] / (k - bit_list_length)) * (torch.sum(g_k_k ** 2) / inner_product)
                     alphas[i] = min(alphas[i], alpha_i_k.item())
-
         # 가중치의 합이 비트 리스트의 길이가 되도록 정규화
         alpha_sum = sum(alphas)
         alphas = [(alpha / alpha_sum) * len(alphas) for alpha in alphas]
@@ -201,8 +210,38 @@ class DeepHashingModel(pl.LightningModule):
             lcs_losses.append(loss)
         return lcs_losses
 
+    def consistency_loss(self, anchors, positives):
+        return F.mse_loss(anchors, positives)
+
+    def quantization_loss(self, embeddings):
+        return torch.mean((embeddings.abs() - 1) ** 2)
+
+    def eaql_loss(self, embeddings):
+        with torch.no_grad():
+            sign_target = torch.sign(embeddings.detach())  # detached binarized version
+        quant_error = (embeddings - sign_target) ** 2  # [B, D]
+        bitwise_error = quant_error.mean(dim=0)  # [D]
+
+        # EMA 업데이트
+        if self.bit_importance_ema is None:
+            self.bit_importance_ema = bitwise_error.detach().clone()
+        else:
+            self.bit_importance_ema = (
+                    self.ema_decay * self.bit_importance_ema +
+                    (1 - self.ema_decay) * bitwise_error.detach()
+            )
+        weights = bitwise_error / (bitwise_error.sum() + 1e-6)  # normalize to sum to 1
+        weighted_quant_error = (quant_error * weights)  # (B, D)
+        loss = weighted_quant_error.sum(dim=1).mean()  # (B,) → scalar
+        return loss
+
     def training_step(self, batch, batch_idx):
         images, labels = batch
+        unique_labels = labels.unique()
+        if unique_labels.numel() < 2:
+            dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
+            self.log("train/skipped_batch", 1.0, on_step=True, logger=True, sync_dist=True)
+            return dummy_loss
         # 중복 계산을 방지하기 위해 전체 배치 이미지를 한 번에 임베딩 게산
         images_embeds_list = self(images)
         total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='train')
@@ -210,141 +249,84 @@ class DeepHashingModel(pl.LightningModule):
         bit_list_length = len(self.hparams.bit_list)
         alphas = self.calculate_alpha(total_losses, bit_list_length)
 
-        # --- 장단기 계단식 자기 증류 손실 계산 ---
+        # --- LCS 손실 계산 ---
         hash_codes = [torch.sign(out) for out in images_embeds_list]
         lcs_losses = self.calculate_lcs_loss(hash_codes)
+
+        # --- Consistency Loss 계산 ---
+        cons_losses = []
+        for embeds in images_embeds_list:
+            anchors, positives, _, _, _, _ = self.vectorized_sample_hard_triplets(embeds, labels)
+            cons_loss = self.consistency_loss(anchors, positives)
+            cons_losses.append(cons_loss)
+        consistency_loss_total = sum(cons_losses)
+
+        # --- Quantization Loss 계산 ---
+        quant_losses = [self.eaql_loss(embed) for embed in images_embeds_list]
+        quantization_loss_total = sum(quant_losses)
 
         # --- 최종 목표 함수 계산 ---
         total_loss = 0
         for k in range(bit_list_length - 1):
             total_loss += alphas[k] * (total_losses[k] + self.hparams.lambda_lcs * lcs_losses[k])
         total_loss += alphas[bit_list_length - 1] * total_losses[bit_list_length - 1]
-        self.log("train/lcs_loss", sum(lcs_losses),
-                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
-        self.log("train/final_loss", total_loss,
-                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
+
+        # 추가 손실들을 최종 Loss에 반영
+        total_loss += self.hparams.lambda_cons * consistency_loss_total
+        total_loss += self.hparams.lambda_quant * quantization_loss_total
+
+        self.log("train/lcs_loss", sum(lcs_losses), on_step=True, on_epoch=True, prog_bar=True, logger=True,
+                 sync_dist=True, batch_size=images.size(0))
+        self.log("train/final_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
+                 sync_dist=True, batch_size=images.size(0))
         return total_loss
 
-    def validation_step(self, batch, batch_idx):
-        images, labels = batch
-        with torch.no_grad():
-            images_embeds_list = self(images)
-        total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='val')
-        final_val_loss = sum(total_losses)
-        self.log("val/final_loss", final_val_loss,
-                 on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=images.size(0))
-        for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
-            self.validation_step_outputs_mAP[bit].append((images_embeds.detach(), labels.detach()))
-            anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
-            if anchors is not None:
-                self.validation_step_outputs_acc[bit].append((anchors.detach(), positives.detach(), negatives.detach()))
-
-    def calculate_and_log_map(self):
-        for bit in self.hparams.bit_list:
-            outputs = self.validation_step_outputs_mAP[bit]
-            if not outputs:
-                continue
-            embeds_list = [out[0] for out in outputs]
-            labels_list = [out[1] for out in outputs]
-            embeds = torch.cat(embeds_list, dim=0).cpu()
-            labels = torch.cat(labels_list, dim=0).cpu().numpy()
-
-            codes = (torch.sign(embeds) > 0).byte().numpy()
-            query_labels = (labels[:, None] == labels[None, :]).astype(np.uint8)
-            hamm_dist = cdist(codes, codes, metric='hamming') * bit
-
-            aps = []
-            for i in range(codes.shape[0]):
-                y_true = query_labels[i]
-                # Hamming 거리가 가까울수록 점수가 높아야 하므로 음수를 취합니다.
-                y_scores = -hamm_dist[i]
-                aps.append(average_precision_score(y_true, y_scores))
-            if not aps:
-                mean_ap = 0.0
-                print(f"Could not compute mAP for {bit}-bit (all classes have <= 1 sample).")
-            else:
-                mean_ap = float(np.mean(aps))
-            self.log(f"val/{bit}_mAP", mean_ap, prog_bar=True, sync_dist=False)
-
-    def calculate_and_log_acc_sim(self):
+    def calculate_sim_acc(self, anchors, pos, neg, images_embeds):
+        # 평균 positive/negative cosine 유사도
         cos = nn.CosineSimilarity(dim=1)
-        for bit in self.hparams.bit_list:
-            outputs = self.validation_step_outputs_acc[bit]
-            if not outputs:
-                print(f"Skipping Acc/Sim calculation for {bit}-bit: no validation outputs.")
-                continue
-            # 모든 스텝의 (anchor, pos, neg) 튜플을 각각의 리스트로 분리
-            # outputs는 [(A1, P1, N1), (A2, P2, N2), ...] 형태
-            anchors_list, pos_list, neg_list = zip(*outputs)
-            # 전체 앵커, 포지티브, 네거티브를 하나의 큰 텐서로 합침
-            all_anchors = torch.cat(anchors_list, dim=0)
-            all_positives = torch.cat(pos_list, dim=0)
-            all_negatives = torch.cat(neg_list, dim=0)
-            # 1. 유사도 계산
-            pos_sim = cos(all_anchors, all_positives).mean().item()
-            neg_sim = cos(all_anchors, all_negatives).mean().item()
-            # 2. 해시 정확도 계산
-            hash_anchor = torch.sign(all_anchors)
-            hash_pos = torch.sign(all_positives)
-            # (전체 정답 쌍 개수) / (전체 쌍 개수)
-            pos_hash_acc = (hash_anchor == hash_pos).all(dim=1).float().mean().item()
-            self.log(f"val/{bit}_pos_sim", pos_sim, prog_bar=True, sync_dist=False)
-            self.log(f"val/{bit}_neg_sim", neg_sim, prog_bar=True, sync_dist=False)
-            self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc, prog_bar=True, sync_dist=False)
+        pos_sim = cos(anchors, pos).mean()
+        neg_sim = cos(anchors, neg).mean()
 
-    def calculate_and_log_recall_at_k(self):
-        for bit in self.hparams.bit_list:
-            outputs = self.validation_step_outputs_mAP[bit]
-            if not outputs:
-                continue
-            # 1. 데이터 취합 및 해시 코드 생성
-            embeds = torch.cat([out[0] for out in outputs], dim=0).cpu()
-            labels = torch.cat([out[1] for out in outputs], dim=0).cpu().numpy()
-            codes = (torch.sign(embeds) > 0).numpy().astype(np.uint8)
-            num_data = codes.shape[0]
-            # 2. 모든 쌍 간의 Hamming 거리 계산
-            hamm_dist_matrix = cdist(codes, codes, metric='hamming') * bit
-            # 3. 각 쿼리에 대한 전체 정답 개수 미리 계산
-            # is_relevant[i, j] = True if label[i] == label[j]
-            is_relevant = labels[:, None] == labels[None, :]
-            np.fill_diagonal(is_relevant, False)
-            total_relevant_per_query = is_relevant.sum(axis=1)
-            # 4. 각 K 값에 대해 Recall 계산
-            for k in self.hparams.recall_k_values:
-                recalls_for_this_k = []
-                for i in range(num_data):
-                    # i번째 쿼리의 전체 정답 개수
-                    total_relevant = total_relevant_per_query[i]
-                    # i번째 쿼리와 다른 모든 데이터 간의 거리
-                    dists = hamm_dist_matrix[i]
-                    # 거리를 기준으로 인덱스 정렬 (가장 가까운 순)
-                    sorted_indices = np.argsort(dists)
-                    # 상위 K개의 이웃 선택 (자기 자신인 첫 번째 인덱스 제외)
-                    retrieved_indices = sorted_indices[1:k + 1]
-                    # 상위 K개 이웃이 정답인지 확인
-                    # is_relevant[i, retrieved_indices] -> 쿼리 i에 대해, 뽑힌 애들이 정답인지 아닌지 bool 배열
-                    num_retrieved_relevant = is_relevant[i, retrieved_indices].sum()
-                    # Recall 계산
-                    recall_for_query = num_retrieved_relevant / total_relevant
-                    recalls_for_this_k.append(recall_for_query)
-                # 모든 쿼리에 대한 Recall@K의 평균 계산
-                if recalls_for_this_k:
-                    mean_recall_at_k = np.mean(recalls_for_this_k)
-                    self.log(f"val/{bit}_Recall@{k}", mean_recall_at_k, prog_bar=True, sync_dist=False)
+        hash_anchor = torch.sign(anchors)
+        hash_pos = torch.sign(pos)
+        hash_neg = torch.sign(neg)
+        pos_hash_acc = (hash_anchor == hash_pos).all(dim=1).float().mean().item()
+        # 네거티브 쌍에서 해시가 충돌(일치)하는 비율
+        neg_collision_rate = (hash_anchor == hash_neg).all(dim=1).float().mean().item()
 
-    def on_validation_epoch_end(self):
-        if not self.trainer.is_global_zero:
-            return
-        # --- 1. mAP 계산 ---
-        self.calculate_and_log_map()
-        # --- 2. Accuracy 및 Similarity 계산 ---
-        self.calculate_and_log_acc_sim()
-        # --- 3. Recall@K 계산 ---
-        self.calculate_and_log_recall_at_k()
-        # --- 4. 다음 에폭을 위해 저장된 출력 리스트 비우기 ---
-        for bit in self.hparams.bit_list:
-            self.validation_step_outputs_mAP[bit].clear()
-            self.validation_step_outputs_acc[bit].clear()
+        # val_embeds: 검증 세트 전체 임베딩
+        val_codes = torch.sign(images_embeds)
+        # 각 비트(열)의 분산을 구하고 평균. 붕괴 시 0에 가까워짐
+        # 값이 클수록 좋으므로, (1 - variance)를 페널티로 사용 가능
+        mean_bit_variance = val_codes.float().var(dim=0).mean().item()
+        return pos_sim, neg_sim, pos_hash_acc, neg_collision_rate, mean_bit_variance
+
+    def validation_step(self, batch, batch_idx):
+        with torch.no_grad():
+            images, labels = batch
+            images_embeds_list = self(images)
+            for images_embeds, bit in zip(images_embeds_list, self.hparams.bit_list):
+                anchors, positives, negatives, _, _, _ = self.vectorized_sample_hard_triplets(images_embeds, labels)
+                if anchors is None:
+                    dummy_loss = torch.tensor(1e-6, requires_grad=True, device=self.device)
+                    return dummy_loss
+                pos_sim, neg_sim, pos_hash_acc, neg_collision_rate, mean_bit_variance = \
+                    self.calculate_sim_acc(anchors, positives, negatives, images_embeds)
+                self.log(f"val/{bit}_pos_sim", pos_sim,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                self.log(f"val/{bit}_neg_sim", neg_sim,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                self.log(f"val/{bit}_pos_hash_acc", pos_hash_acc,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                self.log(f"val/{bit}_neg_collision_rate", neg_collision_rate,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                self.log(f"val/{bit}_mean_bit_variance", mean_bit_variance,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+                w_coll = 0.0  # 충돌률 페널티 가중치
+                w_var = 1.0  # 분산 보너스 가중치
+                final_score = pos_hash_acc - w_coll * neg_collision_rate + w_var * mean_bit_variance
+                self.log(f"val/{bit}_final_score", final_score,
+                         on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)

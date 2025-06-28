@@ -85,6 +85,15 @@ class DeepHashingModel(pl.LightningModule):
         self.vision_model = backbone.vision_model
         self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim, self.hparams.bit_list)
 
+        self.proxy_anchor_losses = nn.ModuleList([
+            ProxyAnchorLoss(
+                num_classes=self.hparams.num_classes,
+                embedding_dim=bit,
+                margin=self.hparams.proxy_margin,
+                alpha=self.hparams.proxy_alpha
+            ) for bit in self.hparams.bit_list
+        ])
+
         self.validation_step_outputs_mAP = {bit: [] for bit in self.hparams.bit_list}
         self.validation_step_outputs_acc = {bit: [] for bit in self.hparams.bit_list}
 
@@ -157,37 +166,11 @@ class DeepHashingModel(pl.LightningModule):
         return anchors, positives, negatives, anchor_labels, pos_labels, neg_labels
 
     def calculate_base_loss(self, images_embeds_list, labels, loss_type):
-        triplet_losses, ortho_losses, total_losses = [], [], []
-        for images_embeds in images_embeds_list:
-            anchors, positives, negatives, anchor_labels, pos_labels, neg_labels = self.vectorized_sample_hard_triplets(images_embeds, labels)
-            if anchors is None:
-                self.log("train/skipped_batch", 1.0, on_step=True, logger=True, sync_dist=True)
-                zero_loss = sum(torch.sum(embed) for embed in images_embeds_list) * 0.0
-
-                triplet_losses.append(zero_loss)
-                ortho_losses.append(zero_loss)
-                total_losses.append(zero_loss)
-                continue
-
-            # Triplet loss
-            triplet_loss = F.triplet_margin_loss(anchors, positives, negatives, margin=self.hparams.margin)
-
-            # Ortho loss
-            all_embeds = torch.cat([anchors, positives, negatives], dim=0)
-            all_labels = torch.cat([anchor_labels, pos_labels, neg_labels], dim=0)
-            ortho_loss = self.class_aware_ortho_hash_loss(all_embeds, all_labels)
-            total_loss = triplet_loss + self.hparams.lambda_ortho * ortho_loss
-
-            triplet_losses.append(triplet_loss)
-            ortho_losses.append(ortho_loss)
-            total_losses.append(total_loss)
-        triplet_loss = sum(triplet_losses)
-        ortho_loss = sum(ortho_losses)
+        total_losses = []
+        for i, images_embeds in enumerate(images_embeds_list):
+            loss = self.proxy_anchor_losses[i](images_embeds, labels)
+            total_losses.append(loss)
         total_loss = sum(total_losses)
-        self.log(f"{loss_type}/triplet_loss", triplet_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
-                 sync_dist=True, batch_size=images_embeds_list[0].size(0))
-        self.log(f"{loss_type}/ortho_loss", ortho_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
-                 sync_dist=True, batch_size=images_embeds_list[0].size(0))
         self.log(f"{loss_type}/total_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True, batch_size=images_embeds_list[0].size(0))
         return total_losses

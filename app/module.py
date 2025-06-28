@@ -325,7 +325,7 @@ class DeepHashingModel(pl.LightningModule):
                 self.log(f"val/{bit}_mean_bit_variance", mean_bit_variance,
                          on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
                 w_coll = 0.0  # 충돌률 페널티 가중치
-                w_var = 1.0  # 분산 보너스 가중치
+                w_var = 2.0  # 분산 보너스 가중치
                 final_score = pos_hash_acc - w_coll * neg_collision_rate + w_var * mean_bit_variance
                 self.log(f"val/{bit}_final_score", final_score,
                          on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)

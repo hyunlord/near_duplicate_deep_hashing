@@ -44,7 +44,7 @@ class DeepHashingModel(pl.LightningModule):
         self.vision_model = backbone.vision_model
         self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim,
                                    self.hparams.bit_list)
-        self.register_buffer("bit_importance_ema", None)
+        self.bit_importance_ema_dict = {}
         self.ema_decay = 0.99
 
     def forward(self, images):
@@ -222,15 +222,17 @@ class DeepHashingModel(pl.LightningModule):
         quant_error = (embeddings - sign_target) ** 2  # [B, D]
         bitwise_error = quant_error.mean(dim=0)  # [D]
 
-        # EMA 업데이트
-        if self.bit_importance_ema is None:
-            self.bit_importance_ema = bitwise_error.detach().clone()
+        bit = embeddings.size(1)
+        if bit not in self.bit_importance_ema_dict:
+            self.bit_importance_ema_dict[bit] = bitwise_error.detach().clone()
         else:
-            self.bit_importance_ema = (
-                    self.ema_decay * self.bit_importance_ema +
+            self.bit_importance_ema_dict[bit] = (
+                    self.ema_decay * self.bit_importance_ema_dict[bit] +
                     (1 - self.ema_decay) * bitwise_error.detach()
             )
-        weights = bitwise_error / (bitwise_error.sum() + 1e-6)  # normalize to sum to 1
+        ema = self.bit_importance_ema_dict[bit]
+
+        weights = ema / (ema.sum() + 1e-6)  # normalize to sum to 1
         weighted_quant_error = (quant_error * weights)  # (B, D)
         loss = weighted_quant_error.sum(dim=1).mean()  # (B,) → scalar
         return loss

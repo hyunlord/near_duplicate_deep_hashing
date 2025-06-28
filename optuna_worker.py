@@ -82,13 +82,15 @@ def objective(trial):
     metrics = trainer.callback_metrics
     for name, tensor in metrics.items():
         trial.set_user_attr(name, float(tensor))
-    final_loss = float(metrics["val/final_loss"])
-    return final_loss
+    pos_hash_acc = float(metrics["val/pos_hash_acc"])
+    pos_sim = float(metrics["val/64_pos_sim"])
+    neg_sim = float(metrics["val/64_neg_sim"])
+    return pos_hash_acc, pos_sim, neg_sim
 
 
 if __name__ == "__main__":
     study = optuna.load_study(
-        study_name="val_loss_deep_hash_opt",
+        study_name="acc_pos_neg_deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     total_trials = 50

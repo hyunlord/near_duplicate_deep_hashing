@@ -54,8 +54,8 @@ def objective(trial):
         "margin": trial.suggest_float("margin", 0.1, 1.5),
         "lambda_ortho": trial.suggest_float("lambda_ortho", 0.0, 0.2),
         "lambda_lcs": trial.suggest_float("lambda_lcs", 0.0, 2.0),
-        "lambda_cons": trial.suggest_float("lambda_lcs", 0.0, 0.5),
-        "lambda_quant": trial.suggest_float("lambda_lcs", 0.0, 0.2),
+        "lambda_cons": trial.suggest_float("lambda_cons", 0.0, 0.5),
+        "lambda_quant": trial.suggest_float("lambda_quant", 0.0, 0.2),
 
         "batch_groups": 4,
         "images_per_group": 10,

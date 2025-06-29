@@ -47,7 +47,7 @@ class DeepHashingModel(pl.LightningModule):
         self.ema_decay = 0.99
 
     def forward(self, images):
-        features = self.vision_model(images).last_hidden_state.mean(dim=1)
+        features = self.vision_model(images).pooler_output
         outputs = self.nhl(features)
         return outputs
 

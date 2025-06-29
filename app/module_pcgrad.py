@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pytorch_optimizer import PCGrad
 
 import pytorch_lightning as pl
 
@@ -18,8 +19,7 @@ class NestedHashLayer(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size, self.max_bit)
         )
-        #self.layer_norms = nn.ModuleList([nn.LayerNorm(bit) for bit in self.bit_list])
-        self.batch_norms = nn.ModuleList([nn.BatchNorm1d(bit) for bit in self.bit_list])
+        self.layer_norms = nn.ModuleList([nn.LayerNorm(bit) for bit in self.bit_list])
 
     def forward(self, x):
         full_output = self.hash_head(x)
@@ -27,7 +27,7 @@ class NestedHashLayer(nn.Module):
         # 짧은 비트의 파라미터가 긴 비트의 파라미터의 일부가 되는 구조를 만듬
         outputs_bits = [full_output[:, :length] for length in self.bit_list]
         # LayerNorm & L2 Normalization
-        outputs = [F.normalize(bn(output), p=2, dim=1) for output, bn in zip(outputs_bits, self.batch_norms)]
+        outputs = [F.normalize(ln(output), p=2, dim=1) for output, ln in zip(outputs_bits, self.layer_norms)]
         # 여러 길이의 해시 코드에 해당하는 출력을 반환
         return outputs
 
@@ -36,6 +36,9 @@ class DeepHashingModel(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.save_hyperparameters(config)
+
+        # [수정 1] 수동 최적화 모드 활성화
+        self.automatic_optimization = False
 
         backbone = AutoModel.from_pretrained(self.hparams.model_name)
         backbone.config.gradient_checkpointing = True
@@ -133,7 +136,7 @@ class DeepHashingModel(pl.LightningModule):
                 continue
 
             # Triplet loss
-            #triplet_loss = F.triplet_margin_loss(anchors, positives, negatives, margin=self.hparams.margin)
+            # triplet_loss = F.triplet_margin_loss(anchors, positives, negatives, margin=self.hparams.margin)
 
             # contrastive_pair_loss
             positive_loss = self.contrastive_loss(anchors, positives, torch.ones_like(anchor_labels),
@@ -213,29 +216,12 @@ class DeepHashingModel(pl.LightningModule):
     def consistency_loss(self, anchors, positives):
         return F.mse_loss(anchors, positives)
 
-    def eaql_loss(self, embeddings):
-        with torch.no_grad():
-            sign_target = torch.sign(embeddings.detach())  # detached binarized version
-        quant_error = (embeddings - sign_target) ** 2  # [B, D]
-        bitwise_error = quant_error.mean(dim=0)  # [D]
-
-        bit = embeddings.size(1)
-        if bit not in self.bit_importance_ema_dict:
-            self.bit_importance_ema_dict[bit] = bitwise_error.detach().clone()
-        else:
-            self.bit_importance_ema_dict[bit] = (
-                    self.ema_decay * self.bit_importance_ema_dict[bit] +
-                    (1 - self.ema_decay) * bitwise_error.detach()
-            )
-        ema = self.bit_importance_ema_dict[bit]
-
-        weights = ema / (ema.sum() + 1e-6)  # normalize to sum to 1
-        weighted_quant_error = (quant_error * weights)  # (B, D)
-        loss = weighted_quant_error.sum(dim=1).mean()  # (B,) → scalar
-        return loss
-
+    def quantization_loss(self, embeddings):
+        return torch.mean((embeddings.abs() - 1) ** 2)
 
     def training_step(self, batch, batch_idx):
+        optimizer = self.optimizers()
+
         images, labels = batch
         unique_labels = labels.unique()
         if unique_labels.numel() < 2:
@@ -244,10 +230,7 @@ class DeepHashingModel(pl.LightningModule):
             return dummy_loss
         # 중복 계산을 방지하기 위해 전체 배치 이미지를 한 번에 임베딩 게산
         images_embeds_list = self(images)
-        total_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='train')
-
-        bit_list_length = len(self.hparams.bit_list)
-        alphas = self.calculate_alpha(total_losses, bit_list_length)
+        base_losses = self.calculate_base_loss(images_embeds_list, labels, loss_type='train')
 
         # --- LCS 손실 계산 ---
         hash_codes = [torch.sign(out) for out in images_embeds_list]
@@ -259,23 +242,32 @@ class DeepHashingModel(pl.LightningModule):
             anchors, positives, _, _, _, _ = self.vectorized_sample_hard_triplets(embeds, labels)
             cons_loss = self.consistency_loss(anchors, positives)
             cons_losses.append(cons_loss)
-        consistency_loss_total = sum(cons_losses)
 
         # --- Quantization Loss 계산 ---
-        quant_losses = [self.eaql_loss(embed) for embed in images_embeds_list]
-        quantization_loss_total = sum(quant_losses)
+        quant_losses = [self.quantization_loss(embed) for embed in images_embeds_list]
 
-        # --- 최종 목표 함수 계산 ---
-        total_loss = 0
-        for k in range(bit_list_length - 1):
-            total_loss += alphas[k] * (total_losses[k] + self.hparams.lambda_lcs * lcs_losses[k])
-        total_loss += alphas[bit_list_length - 1] * total_losses[bit_list_length - 1]
+        # 3. PCGrad에 전달할 최종 손실 리스트 구성
+        # 각 bit 길이의 base_loss에 보조 손실들을 더해 하나의 태스크로 묶습니다.
+        pcgrad_tasks = []
+        bit_list_length = len(self.hparams.bit_list)
+        for k in range(bit_list_length):
+            task_loss = base_losses[k]
+            task_loss += self.hparams.lambda_quant * quant_losses[k]
+            task_loss += self.hparams.lambda_cons * cons_losses[k]
+            if k < bit_list_length - 1:
+                task_loss += self.hparams.lambda_lcs * lcs_losses[k]
+            pcgrad_tasks.append(task_loss)
+        # 4. 수동으로 그래디언트 계산 및 파라미터 업데이트
+        optimizer.zero_grad()
+        optimizer.pc_backward(pcgrad_tasks)  # PCGrad의 핵심!
+        optimizer.step()
 
-        # 추가 손실들을 최종 Loss에 반영
-        total_loss += self.hparams.lambda_cons * consistency_loss_total
-        total_loss += self.hparams.lambda_quant * quantization_loss_total
-
+        final_loss = sum(pcgrad_tasks)  # 로깅을 위한 전체 손실 합
+        self.log("train/quant_loss", sum(quant_losses), on_step=True, on_epoch=True, prog_bar=True, logger=True,
+                 sync_dist=True, batch_size=images.size(0))
         self.log("train/lcs_loss", sum(lcs_losses), on_step=True, on_epoch=True, prog_bar=True, logger=True,
+                 sync_dist=True, batch_size=images.size(0))
+        self.log("train/cons_loss", sum(cons_losses), on_step=True, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True, batch_size=images.size(0))
         self.log("train/final_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
                  sync_dist=True, batch_size=images.size(0))
@@ -329,7 +321,10 @@ class DeepHashingModel(pl.LightningModule):
                          on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        base_optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        optimizer = PCGrad(base_optimizer)
+        optimizer.param_groups = base_optimizer.param_groups
+
         total_steps = self.trainer.estimated_stepping_batches
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,

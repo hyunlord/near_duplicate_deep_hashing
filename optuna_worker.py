@@ -73,7 +73,7 @@ def objective(trial):
         max_epochs=config["epochs"],
         accelerator="gpu",
         devices=1,
-        precision=16,
+        precision='16-mixed',
         logger=False,
         callbacks=[TQDMProgressBar(refresh_rate=1)],
         log_every_n_steps=1

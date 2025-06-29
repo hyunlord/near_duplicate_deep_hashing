@@ -43,6 +43,7 @@ class DeepHashingModel(pl.LightningModule):
         self.vision_model = backbone.vision_model
         self.nhl = NestedHashLayer(self.vision_model.config.hidden_size, self.hparams.hash_hidden_dim,
                                    self.hparams.bit_list)
+        self.bit_importance_ema_dict = dict()
 
     def forward(self, images):
         features = self.vision_model(images).last_hidden_state.mean(dim=1)

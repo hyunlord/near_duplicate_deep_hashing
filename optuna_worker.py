@@ -89,7 +89,7 @@ def objective(trial):
 
 if __name__ == "__main__":
     study = optuna.load_study(
-        study_name="final_score4_deep_hash_opt",
+        study_name="final_score_deep_hash_opt",
         storage="sqlite:////hanmail/users/rexxa.som/shared/optuna.db"
     )
     total_trials = 50

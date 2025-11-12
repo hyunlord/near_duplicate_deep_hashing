@@ -18,8 +18,11 @@ class SimpleBatchSampler(Sampler):
     """
     단일 GPU용 단순화된 배치 샘플러
     그룹 기반 샘플링으로 triplet mining에 적합
+
+    중요: 데이터셋은 그룹별로 순서대로 정렬되어 있어야 합니다.
+    예: [그룹0 이미지들, 그룹1 이미지들, 그룹2 이미지들, ...]
     """
-    def __init__(self, dataset, batch_groups, images_per_group, shuffle=True):
+    def __init__(self, dataset, batch_groups, images_per_group, shuffle=False):
         """
         Args:
             dataset: Dataset
@@ -53,9 +56,10 @@ class SimpleBatchSampler(Sampler):
 
     def __iter__(self):
         """배치 인덱스 생성"""
-        # 그룹 순서 셔플
+        # 그룹 순서 (shuffle=False로 순서 유지)
         group_indices = list(range(self.num_groups))
         if self.shuffle:
+            # 주의: 데이터셋이 그룹별로 정렬되어 있다면 shuffle하면 안 됨
             random.shuffle(group_indices)
 
         # 배치 생성
@@ -210,11 +214,12 @@ class ImageTextDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         # SimpleBatchSampler 사용
+        # shuffle=False: 데이터셋이 그룹별로 순서대로 정렬되어 있어야 함
         sampler = SimpleBatchSampler(
             self.train_dataset,
             batch_groups=self.batch_groups,
             images_per_group=self.images_per_group,
-            shuffle=True
+            shuffle=False  # 데이터셋 순서 유지 필수
         )
 
         return DataLoader(

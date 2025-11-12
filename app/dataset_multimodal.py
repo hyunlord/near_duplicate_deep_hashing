@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import numpy as np
 import random
 
 
@@ -97,6 +98,11 @@ class ImageTextPairDataset(Dataset):
         elif not isinstance(image, Image.Image):
             image = Image.fromarray(image).convert('RGB')
 
+        # PIL Image를 numpy array로 변환 (Albumentations 요구사항)
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+
+        # Albumentations 적용
         if self.transform:
             image = self.transform(image=image)['image']
 
